@@ -215,7 +215,8 @@ class GraphToOutputExampleToTfexample():
             output_token_vocab_dict)
 
   def convert_and_write_tfexample(
-      self, p, additional_train_transformation_funcs=(),
+      #self, p, additional_train_transformation_funcs=(),
+      self, additional_train_transformation_funcs=(),    
       additional_train_filter_funcs=(),
       additional_valid_transformation_funcs=(),
       additional_valid_filter_funcs=(),
@@ -265,74 +266,75 @@ class GraphToOutputExampleToTfexample():
         edge_type_vocab_dict=edge_type_vocab_dict,
         output_token_vocab_dict=output_token_vocab_dict)
 
-    metadata = (
-        p
-        | f'Create metadata {self.dataset_name}' >> beam.Create([{}])
-    )
+#     metadata = (
+#         p
+#         | f'Create metadata {self.dataset_name}' >> beam.Create([{}])
+#     )
 
     for split in [
         constants.TRAIN_SPLIT_NAME, constants.VALIDATION_SPLIT_NAME,
         constants.TEST_SPLIT_NAME
     ]:
-      split_graph_to_output_example_dir = os.path.join(
-          self.graph_to_output_example_dir, split)
-      file_pattern = os.path.join(split_graph_to_output_example_dir, '*.json')
-      graph_to_output_examples = (
-          p
-          | 'Read {} GraphToOutputExample for TFExample {}'.format(
-              split, self.dataset_name) >> beam.io.ReadFromText(file_pattern)
-          | 'Parse {} GraphToOutputExample as json for TFExample {}'.format(
-              split, self.dataset_name) >> beam.Map(json.loads)
-          | 'Reconstruct {} GraphToOutputExample for TFExample {}'.format(
-              split, self.dataset_name) >> beam.ParDo(
-                  ParseAndProcessGraphToOutputExample(
-                      self.transformation_funcs[split],
-                      self.filter_funcs[split]))
-          | 'Reshuffle {} GraphToOutputExample for TFExample {}'.format(
-              split, self.dataset_name) >> beam.Reshuffle())
+      with beam.Pipeline() as p:
+        split_graph_to_output_example_dir = os.path.join(
+            self.graph_to_output_example_dir, split)
+        file_pattern = os.path.join(split_graph_to_output_example_dir, '*.json')
+        graph_to_output_examples = (
+            p
+            | 'Read {} GraphToOutputExample for TFExample {}'.format(
+                split, self.dataset_name) >> beam.io.ReadFromText(file_pattern)
+            | 'Parse {} GraphToOutputExample as json for TFExample {}'.format(
+                split, self.dataset_name) >> beam.Map(json.loads)
+            | 'Reconstruct {} GraphToOutputExample for TFExample {}'.format(
+                split, self.dataset_name) >> beam.ParDo(
+                    ParseAndProcessGraphToOutputExample(
+                        self.transformation_funcs[split],
+                        self.filter_funcs[split]))
+            | 'Reshuffle {} GraphToOutputExample for TFExample {}'.format(
+                split, self.dataset_name) >> beam.Reshuffle())
 
-      tfexample_feature_dicts = (
-          graph_to_output_examples
-          | '{} GraphToOutputExample to tfexample feature {}'.format(
-              split, self.dataset_name) >> beam.Map(get_tfexample_feature_fn))
-
-      if split == constants.TRAIN_SPLIT_NAME:
-        # Filter impossible examples in the training data to avoid infinite
-        # loss. This should not be done on the test split.
-        filter_impossible_tfexample_fn = functools.partial(
-            util.filter_impossible_tfexample,
-            output_token_vocab_dict=output_token_vocab_dict)
         tfexample_feature_dicts = (
+            graph_to_output_examples
+            | '{} GraphToOutputExample to tfexample feature {}'.format(
+                split, self.dataset_name) >> beam.Map(get_tfexample_feature_fn))
+
+        if split == constants.TRAIN_SPLIT_NAME:
+          # Filter impossible examples in the training data to avoid infinite
+          # loss. This should not be done on the test split.
+          filter_impossible_tfexample_fn = functools.partial(
+              util.filter_impossible_tfexample,
+              output_token_vocab_dict=output_token_vocab_dict)
+          tfexample_feature_dicts = (
+              tfexample_feature_dicts
+              |
+              'Filter impossible {} tfexample {}'.format(split, self.dataset_name)
+              >> beam.Filter(filter_impossible_tfexample_fn))
+
+#         metadata = self.update_dataset_metadata(
+#             metadata, split, tfexample_feature_dicts)
+
+        file_path_prefix = os.path.join(self.tfrecord_dir, split,
+                                        self.dataset_name)
+        _ = (
             tfexample_feature_dicts
-            |
-            'Filter impossible {} tfexample {}'.format(split, self.dataset_name)
-            >> beam.Filter(filter_impossible_tfexample_fn))
-
-      metadata = self.update_dataset_metadata(
-          metadata, split, tfexample_feature_dicts)
-
-      file_path_prefix = os.path.join(self.tfrecord_dir, split,
-                                      self.dataset_name)
-      _ = (
-          tfexample_feature_dicts
-          | 'Serialize {} tfexample feature {}'.format(split, self.dataset_name)
-          >> beam.Map(tfexample_utils.serialize_tfexample_feature)
-          | 'Writing {} tfexample to disk {}'.format(
-              split, self.dataset_name) >> beam.io.WriteToTFRecord(
-                  file_path_prefix,
-                  file_name_suffix='.tfrecord',
-                  num_shards=self.num_shards))
+            | 'Serialize {} tfexample feature {}'.format(split, self.dataset_name)
+            >> beam.Map(tfexample_utils.serialize_tfexample_feature)
+            | 'Writing {} tfexample to disk {}'.format(
+                split, self.dataset_name) >> beam.io.WriteToTFRecord(
+                    file_path_prefix,
+                    file_name_suffix='.tfrecord',
+                    num_shards=self.num_shards))
 
     # Don't save the metadata when we copy from an existing metadata file.
-    if not self.copy_metadata_file:
-      _ = (
-          metadata
-          |
-          f'Write metadata to file {self.dataset_name}' >> beam.io.WriteToText(
-              self.metadata_file,
-              num_shards=1,
-              shard_name_template='',
-              coder=util.JsonCoder()))
+#     if not self.copy_metadata_file:
+#       _ = (
+#           metadata
+#           |
+#           f'Write metadata to file {self.dataset_name}' >> beam.io.WriteToText(
+#               self.metadata_file,
+#               num_shards=1,
+#               shard_name_template='',
+#               coder=util.JsonCoder()))
 
   def update_dataset_metadata(self, metadata, split, tfexample_feature_dicts):
     """Update the dataset metadata.
@@ -612,8 +614,8 @@ class GraphToOutputExampleToTfexample():
     if not self.exists_tfrecords():
       if self.copy_metadata_file:
         self.copy_metadata(open)
-      with beam.Pipeline() as p:
-        self.convert_and_write_tfexample(p)
+      #with beam.Pipeline() as p:
+      self.convert_and_write_tfexample()
 
 
 class ParseAndProcessGraphToOutputExample(beam.DoFn):
